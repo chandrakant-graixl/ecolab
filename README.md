@@ -126,3 +126,76 @@ flowchart LR
   class app service;
   class s3,chroma datastore;
 ```
+
+### Architecture / component diagram (containers and data flow)
+
+```mermaid
+flowchart LR
+  user[User] --> browser[Web Browser]
+
+  subgraph AWS
+    direction TB
+
+    s3[S3 Static Site]
+    browser --> s3
+
+    subgraph EC2
+      direction TB
+      api[Express Backend]
+      subgraph Docker
+        chroma[ChromaDB]
+      end
+      api --- chroma
+    end
+  end
+
+  s3 --> api
+
+  %% External services
+  openai[OpenAI API]
+  openaq[OpenAQ API]
+
+  api --> openai
+  api --> openaq
+```
+
+### Runtime sequence diagram for a single /chat request
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant F as Frontend SPA
+  participant B as Express Backend
+  participant A as answerUser in agent ts
+  participant C as Chroma module
+  participant Ux as utils module
+  participant O as OpenAI API
+  participant Q as OpenAQ API
+
+  U->>F: Type message
+  F->>B: POST /chat with user message
+  B->>A: call answerUser
+
+  A->>Ux: buildContext with message
+  A->>C: getOrCreateCollection
+  C-->>A: collection handle
+  A->>C: ragQuery with embeddings
+  C-->>A: retrieved passages
+  A->>Ux: merge context and passages
+
+  A->>O: chat completion with user message and context
+  alt tool call required
+    O-->>A: tool call request
+    A->>Q: fetch data from OpenAQ via tool function
+    Q-->>A: air quality data
+    A->>O: send tool result
+    O-->>A: final completion text
+  else no tool call
+    O-->>A: final completion text
+  end
+
+  A-->>B: answer payload
+  B-->>F: JSON response
+  F-->>U: render assistant reply
+```
