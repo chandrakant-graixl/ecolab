@@ -91,28 +91,39 @@ You may ask a question like - **What's the air quality like in Masachusettes?** 
 
 ```mermaid
 flowchart LR
+  %% Actors
   user[User] -->|HTTPS| browser[Web Browser]
 
-  subgraph aws[AWS]
+  %% Cloud
+  subgraph AWS
     direction TB
 
-    s3[(S3 Bucket\nStatic Website)]
+    %% Frontend
+    s3[(S3 Bucket<br/>Static Website Hosting)]
     browser -->|GET HTML/CSS/JS| s3
 
-    subgraph ec2[EC2 Instance]
+    %% Backend on EC2
+    subgraph EC2
       direction TB
-      express[Express App\n(Air Quality Agent)]
-      subgraph docker[Docker Engine]
-        chroma[ChromaDB\n(Container)]
+      app[Express App<br/>Air Quality Agent]
+      subgraph Docker
+        direction TB
+        chroma[(ChromaDB<br/>Container)]
       end
-      express <-.->|Localhost/Bridge Network| chroma
+      app ---|localhost / Docker bridge| chroma
     end
 
-    s3 --->|XHR/Fetch API\nHTTPS| express
+    %% SPA -> API
+    s3 -->|API calls (HTTPS)| app
   end
 
-  classDef svc fill:#f6f8fa,stroke:#666,rx:6,ry:6,color:#111;
-  classDef node fill:#fff,stroke:#999,rx:6,ry:6,color:#111;
-  class s3,express,chroma,ec2,docker,node,aws svc;
-  class user,browser node;
+  %% Styling
+  classDef actor fill:#ffffff,stroke:#666,rx:6,ry:6,color:#111;
+  classDef service fill:#f6f8fa,stroke:#666,rx:6,ry:6,color:#111;
+  classDef datastore fill:#fffbe6,stroke:#c9a227,rx:6,ry:6,color:#111;
+
+  class user,browser actor;
+  class app service;
+  class s3,chroma datastore;
 ```
+
