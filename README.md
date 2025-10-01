@@ -92,15 +92,15 @@ You may ask a question like - **What's the air quality like in Masachusettes?** 
 ```mermaid
 flowchart LR
   %% Actors
-  user[User] -->|HTTPS| browser[Web Browser]
+  user[User] --> browser[Web Browser]
 
   %% Cloud
   subgraph AWS
     direction TB
 
     %% Frontend
-    s3[(S3 Bucket<br/>Static Website Hosting)]
-    browser -->|GET HTML/CSS/JS| s3
+    s3[(S3 Bucket<br/>Static Website)]
+    browser --> s3
 
     %% Backend on EC2
     subgraph EC2
@@ -108,13 +108,13 @@ flowchart LR
       app[Express App<br/>Air Quality Agent]
       subgraph Docker
         direction TB
-        chroma[(ChromaDB<br/>Container)]
+        chroma[(ChromaDB Container)]
       end
-      app ---|localhost / Docker bridge| chroma
+      app --- chroma
     end
 
     %% SPA -> API
-    s3 -->|API calls (HTTPS)| app
+    s3 --> app
   end
 
   %% Styling
@@ -126,4 +126,3 @@ flowchart LR
   class app service;
   class s3,chroma datastore;
 ```
-
