@@ -55,9 +55,10 @@ Chroma DB needs to be populated next by ingesting the data in the docs directory
 npm run ingest
 ```
 
-To run the application execute this command:
+To build and run the application execute this command:
 
 ```
+npm run build
 npm run dev
 ```
 
@@ -69,7 +70,7 @@ Inside the frontend directory inside a terminal run the following command to ins
 npm install
 ```
 
-To start the application run the following command:
+To build and start the application run the following command:
 
 ```
 npm run dev
