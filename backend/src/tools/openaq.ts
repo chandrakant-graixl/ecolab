@@ -26,6 +26,7 @@ function makeClient(): AxiosInstance {
   });
 }
 
+/** Ensure caller uses bbox OR (lat, lon [+radius]), not both. */
 function assertValidGeo(p: AirQualityParams) {
   const hasBbox = !!p.bbox;
   const hasPoint = p.latitude != null && p.longitude != null;
@@ -39,18 +40,18 @@ function normalizeParamName(x?: string) {
   return String(x).toLowerCase().replace(/\s+/g, "");
 }
 
-/** true if a latest row matches the requested parameter name/code */
+/** Returns true if a 'latest' row matches the desired parameter code/name (when present). */
 function rowMatchesParam(row: any, want?: string) {
   if (!want) return true;
   const w = normalizeParamName(want);
-  // OpenAQ v3 may expose parameter code/name in different shapes depending on endpoint.
+  // OpenAQ may expose code/name under different fields; normalize and compare.
   const code =
-    normalizeParamName(row?.parameter) || // sometimes "pm25"
+    normalizeParamName(row?.parameter) ||
     normalizeParamName(row?.parameterCode) ||
     normalizeParamName(row?.parametersCode) ||
     normalizeParamName(row?.parameter_name) ||
     normalizeParamName(row?.parametersName);
-  return !w || (code ? code === w : true); // if code absent, don't over-filter
+  return !w || (code ? code === w : true); // if missing, don’t over-filter to zero
 }
 
 type LatestItem = {
@@ -76,7 +77,11 @@ async function getLatestForLocation(client: AxiosInstance, id: number) {
   return (r.data?.results ?? []) as any[];
 }
 
-/** Core retrieval with optional parameter filtering and radius */
+/**
+ * Internal: fetch latest readings with optional parameter filtering and given radius.
+ * - Builds /locations query for bbox OR coordinates+radius.
+ * - Iterates matched locations and aggregates /latest rows.
+ */
 async function fetchCore(
   params: AirQualityParams,
   radiusMeters: number,
@@ -103,7 +108,6 @@ async function fetchCore(
   if (bbox) {
     locQuery["bbox"] = bbox.join(",");
   } else if (latitude != null && longitude != null) {
-    // coordinates=latitude,longitude + radius (meters)
     locQuery["coordinates"] = `${latitude},${longitude}`;
     locQuery["radius"] = String(radiusMeters);
   }
@@ -115,9 +119,7 @@ async function fetchCore(
     try {
       const rows = await getLatestForLocation(client, loc.id);
       for (const row of rows) {
-        // If we can see a parameter code/name, filter; otherwise keep it (avoid over-filtering to zero)
         if (!rowMatchesParam(row, wantParam)) continue;
-
         out.push({
           locationsId: row.locationsId ?? loc.id,
           locationName: loc.name,
@@ -136,7 +138,7 @@ async function fetchCore(
         });
       }
     } catch {
-      // skip this location if /latest fails
+      // Skip locations with failing /latest calls (keep robust)
       continue;
     }
   }
@@ -146,15 +148,20 @@ async function fetchCore(
 
 /**
  * Public API: fetchAirQualityLatest(params)
+ *
  * Strategy:
- *  1) Try radius (default 25 km) WITH parameter filter
- *  2) If empty, try SAME radius WITHOUT parameter filter
- *  3) If still empty, expand radius to 40 km and repeat (with param, then without)
+ *  1) Try base radius (default 25 km, clamped to 1..25,000 m) WITH parameter filter
+ *  2) Same radius WITHOUT filter
+ *  3) Expand to min(base+15 km, 40 km) WITH filter
+ *  4) Expanded radius WITHOUT filter
+ *
+ * Returns: { meta: { count, radius, parameterFiltered, page, limit }, results: LatestItem[] }
+ * Throws: for 4xx OpenAQ errors (surfaces server message), otherwise falls through attempts.
  */
 export async function fetchAirQualityLatest(params: AirQualityParams) {
   assertValidGeo(params);
 
-  const baseRadius = Math.min(Math.max(params.radius ?? 25_000, 1), 25_000); // clamp to 1..25000
+  const baseRadius = Math.min(Math.max(params.radius ?? 25_000, 1), 25_000);
   const attempts: { r: number; filter: boolean }[] = [
     { r: baseRadius, filter: true },
     { r: baseRadius, filter: false },
@@ -172,18 +179,21 @@ export async function fetchAirQualityLatest(params: AirQualityParams) {
         };
       }
     } catch (err: any) {
-      // If this was a client error (4xx), surface it immediately
       const status = err?.response?.status;
       if (status && status >= 400 && status < 500) {
         throw new Error(
-          `OpenAQ error ${status}: ${typeof err.response?.data === "string" ? err.response.data.slice(0, 300) : JSON.stringify(err.response?.data)?.slice(0, 300)}`
+          `OpenAQ error ${status}: ${
+            typeof err.response?.data === "string"
+              ? err.response.data.slice(0, 300)
+              : JSON.stringify(err.response?.data)?.slice(0, 300)
+          }`
         );
       }
-      // else try next attempt
+      // Non-4xx: try next attempt
     }
   }
 
-  // Nothing found after retries
+  // No data after all attempts
   return {
     meta: { count: 0, radius: Math.min(baseRadius + 15_000, 40_000), parameterFiltered: false, page: params.page ?? 1, limit: params.limit ?? 20 },
     results: [],

@@ -1,3 +1,6 @@
+/**
+ * Tools which would be used by our agent
+ */
 export const tools = [
   {
     type: "function" as const,

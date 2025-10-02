@@ -1,3 +1,31 @@
+/**
+ * ingestMarkdown.ts
+ *
+ * Purpose:
+ * - Stream-ingest Markdown (*.md) files from a folder into a Chroma collection for RAG.
+ * - Chunks text with overlap, cleans Markdown → plain text, embeds via OpenAI, and upserts.
+ *
+ * Notes on state:
+ * - This script is **stateless** (no chat/session memory). It just indexes files.
+ *   In production you’d pair it with a **stateful** agent that remembers conversation history.
+ *
+ * Tunables:
+ * - CHUNK_SIZE_CHARS (default: 1200): target chars per chunk
+ * - OVERLAP_CHARS (default: 200): sliding window overlap
+ * - READ_BLOCK_BYTES (default: 64KB): file read block size
+ * - UPSERT_BATCH (default: 16): items per upsert call
+ *
+ * Flow:
+ * 1) Discover .md files in a folder
+ * 2) Stream-read each file → decode → window into chunks (with overlap)
+ * 3) Clean Markdown → text per chunk
+ * 4) Batch-embed + upsert into Chroma with metadata (source, chunk, pollutant tag)
+ * 5) Repeat per file, log totals
+ *
+ * CLI:
+ * - node ingestMarkdown.js [folder]    // defaults to ./docs
+ */
+
 import { getOrCreateCollection, upsertDocs } from "./chroma";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -7,7 +35,7 @@ const OVERLAP_CHARS = 200;            // overlap between chunks
 const READ_BLOCK_BYTES = 64 * 1024;   // bytes per low-level read (64KB)
 const UPSERT_BATCH = 16;              // number of chunks per Chroma upsert
 
-// Very lightweight Markdown → text cleaner, safe to use per-chunk.
+// Lightweight Markdown → text cleaner (safe per-chunk)
 function mdToText(md: string): string {
   return md
     .replace(/```[\s\S]*?```/g, " ")                 // code fences
@@ -22,7 +50,7 @@ function mdToText(md: string): string {
     .trim();
 }
 
-// Infer pollutant tag from filename to help future filtering
+// Infer pollutant tag from filename (helps filtering later)
 function inferPollutant(file: string): string | undefined {
   const base = path.basename(file).toLowerCase();
   if (base.includes("pm2.5") || base.includes("pm2_5") || base.includes("pm25")) return "pm2.5";
@@ -32,8 +60,10 @@ function inferPollutant(file: string): string | undefined {
   return undefined;
 }
 
-// Emit windowed chunks (with overlap) from a growing text buffer without
-// letting the buffer grow unbounded. Returns the remaining tail string.
+/**
+ * Windowed emission with overlap. Flushes batches to Chroma via upsertDocs.
+ * Returns the remaining tail (to keep overlap continuity) and counters.
+ */
 async function flushWindows(
   buf: string,
   fileBase: string,
@@ -58,21 +88,24 @@ async function flushWindows(
     emitted += 1;
     chunkIdx += 1;
 
-    // Move window forward, keeping overlap
+    // Slide window forward, keep overlap
     cursor += (CHUNK_SIZE_CHARS - OVERLAP_CHARS);
 
-    // Upsert in small batches to control memory/latency
+    // Small, predictable upserts
     if (pending.length >= UPSERT_BATCH) {
       await upsertDocs(collection, pending);
       pending.length = 0;
     }
   }
 
-  // Keep the un-emitted tail in memory (includes the overlap naturally)
-  const tail = buf.slice(cursor);
-  return { tail, nextChunkIdx: chunkIdx, emitted };
+  return { tail: buf.slice(cursor), nextChunkIdx: chunkIdx, emitted };
 }
 
+/**
+ * Stream-ingest a single Markdown file.
+ * - Streaming decode handles multibyte boundaries.
+ * - Flush windows as we go to bound memory.
+ */
 async function ingestOneMarkdownFile(
   fullPath: string,
   collection: Awaited<ReturnType<typeof getOrCreateCollection>>
@@ -80,10 +113,9 @@ async function ingestOneMarkdownFile(
   const fileBase = path.basename(fullPath);
   const pollutant = inferPollutant(fullPath);
 
-  // Low-level streaming read
   const fd = await fs.open(fullPath, "r");
   const decoder = new TextDecoder("utf-8", { fatal: false });
-  let acc = "";                    // growing text buffer (but bounded via flushWindows)
+  let acc = "";                    // bounded via flushWindows
   let bytesRead = 0;
   let chunkIdx = 0;
   let totalChunks = 0;
@@ -97,10 +129,8 @@ async function ingestOneMarkdownFile(
       if (n <= 0) break;
       bytesRead += n;
 
-      // Stream decode into text; decoder handles multibyte boundaries
       acc += decoder.decode(buf.subarray(0, n), { stream: true });
 
-      // Turn current buffer into windows and upsert in batches
       const { tail, nextChunkIdx, emitted } = await flushWindows(
         acc, fileBase, pollutant, chunkIdx, collection, pending
       );
@@ -109,22 +139,18 @@ async function ingestOneMarkdownFile(
       totalChunks += emitted;
     }
 
-    // Flush the decoder's internal state and any remaining text
-    acc += decoder.decode(); // end of stream
-
-    // Final windows (may be less than full size)
+    // End of stream: flush decoder + final tail
+    acc += decoder.decode();
     if (acc.trim().length > 0) {
       const cleaned = mdToText(acc);
-      const item = {
+      pending.push({
         id: `${fileBase}#${chunkIdx}`,
         text: cleaned,
         meta: { source: fileBase, chunk: chunkIdx, pollutant, type: "markdown" },
-      };
-      pending.push(item);
+      });
       totalChunks += 1;
     }
 
-    // Final upsert for remaining batch
     if (pending.length > 0) {
       await upsertDocs(collection, pending);
       pending.length = 0;
@@ -137,6 +163,9 @@ async function ingestOneMarkdownFile(
   return totalChunks;
 }
 
+/**
+ * Ingest all .md files from a folder (sequentially).
+ */
 async function ingestFolder(folder = "./docs") {
   const entries = await fs.readdir(folder, { withFileTypes: true });
   const mdFiles = entries
@@ -149,11 +178,9 @@ async function ingestFolder(folder = "./docs") {
   }
 
   const collection = await getOrCreateCollection();
-
   let totalFiles = 0;
   let totalChunks = 0;
 
-  // Process files strictly one-by-one
   for (const file of mdFiles) {
     try {
       const emitted = await ingestOneMarkdownFile(file, collection);
@@ -164,9 +191,10 @@ async function ingestFolder(folder = "./docs") {
     }
   }
 
-  console.log(`✅ Done. Ingested ${totalChunks} chunks from ${totalFiles} file(s).`);
+  console.log(`Done. Ingested ${totalChunks} chunks from ${totalFiles} file(s).`);
 }
 
+// CLI entry
 if (require.main === module) {
   const folder = process.argv[2] ?? "./docs";
   ingestFolder(folder).catch(err => {

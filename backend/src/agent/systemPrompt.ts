@@ -1,3 +1,6 @@
+/**
+ * The System Prompt for our agent
+ */
 export const SYSTEM_PROMPT = `You are an assistant specializing in air quality, pollution, and environmental health.
 
 Use both:
